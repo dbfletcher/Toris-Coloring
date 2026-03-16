@@ -266,7 +266,7 @@ fun ColoringApp() {
         Color(0xFFF48FB1), // Pink
         Color(0xFF795548), // Brown
         Color(0xFFE0E0E0), // White
-        Color(0xFF000000)  // Black
+        Color(0xFF555555)  // "Trick" Black (Dark Graphite)
     )
     var selectedColor by remember { mutableStateOf(palette[0]) }
 
@@ -452,9 +452,16 @@ fun ColoringApp() {
                 modifier = Modifier.clickable {
                     scope.launch {
                         isProcessing = true
+
+                        // NEW: Save the current picture to the undo stack before wiping it!
+                        currentBitmap?.let {
+                            historyStack.add(it)
+                            if (historyStack.size > 10) historyStack.removeAt(0)
+                        }
+
                         scale = 1f
                         pan = Offset.Zero
-                        historyStack.clear()
+
                         withContext(Dispatchers.IO) {
                             if (selectedUri != null) currentBitmap = loadMutableBitmapFromUri(context, selectedUri!!)
                             else if (selectedResId != null) currentBitmap = loadMutableBitmapFromRes(context, selectedResId!!)
