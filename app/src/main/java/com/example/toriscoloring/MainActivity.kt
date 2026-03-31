@@ -207,11 +207,18 @@ fun ColoringApp() {
     val prefs = remember { context.getSharedPreferences("ToriColoringPrefs", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
 
-    // --- Built-in Image Library ---
+// --- Built-in Image Library ---
     val defaultImageLibrary = listOf<Int>(
+        // Paw Patrol
         R.drawable.ppcolor1, R.drawable.ppcolor2, R.drawable.ppcolor3,
         R.drawable.ppcolor4, R.drawable.ppcolor5, R.drawable.ppcolor6,
-        R.drawable.ppcolor7, R.drawable.ppcolor8, R.drawable.ppcolor9
+        R.drawable.ppcolor7, R.drawable.ppcolor8, R.drawable.ppcolor9,
+
+        // Octonauts
+        R.drawable.octo1, R.drawable.octo2,
+        R.drawable.octo_gup_a, R.drawable.octo_gup_b,
+        R.drawable.octo_gup_c, R.drawable.octo_gup_d,
+        R.drawable.octo_gup_h
     )
 
     // --- State ---
