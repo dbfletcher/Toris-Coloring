@@ -66,6 +66,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// A new data class to remember both the picture AND which thumbnail was selected
+data class CanvasState(val bitmap: ImageBitmap, val uri: Uri?, val resId: Int?)
+
 // --- Image Loading & Manipulation Logic ---
 fun getRotationFromExif(context: Context, uri: Uri): Int {
     var rotation = 0
@@ -134,20 +137,6 @@ fun loadMutableBitmapFromRes(context: Context, resId: Int): ImageBitmap? {
     } catch (e: Exception) { null }
 }
 
-fun getThumbnailFromUri(context: Context, uri: Uri): ImageBitmap? {
-    return try {
-        val rotation = getRotationFromExif(context, uri)
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
-        options.inSampleSize = calculateInSampleSize(options, 150, 150)
-        options.inJustDecodeBounds = false
-        context.contentResolver.openInputStream(uri)?.use {
-            val bitmap = BitmapFactory.decodeStream(it, null, options)
-            if (bitmap != null) rotateBitmap(bitmap, rotation).asImageBitmap() else null
-        }
-    } catch (e: Exception) { null }
-}
-
 // --- Image Saving Logic ---
 fun saveBitmapToGallery(context: Context, bitmap: Bitmap): Boolean {
     return try {
@@ -155,7 +144,6 @@ fun saveBitmapToGallery(context: Context, bitmap: Bitmap): Boolean {
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
-            // Saves it to a dedicated "ToriColoring" folder in the phone's Pictures directory
             put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ToriColoring")
         }
 
@@ -163,17 +151,10 @@ fun saveBitmapToGallery(context: Context, bitmap: Bitmap): Boolean {
 
         if (uri != null) {
             val stream: OutputStream? = context.contentResolver.openOutputStream(uri)
-            stream?.use {
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
-            }
+            stream?.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             true
-        } else {
-            false
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        false
-    }
+        } else false
+    } catch (e: Exception) { e.printStackTrace(); false }
 }
 
 // --- The Core Flood Fill Algorithm ---
@@ -184,7 +165,6 @@ fun floodFill(bitmap: Bitmap, startX: Int, startY: Int, fillColor: Int, toleranc
     bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
     val targetColor = pixels[startY * width + startX]
-
     if (colorMatch(targetColor, fillColor, 0)) return bitmap
 
     val queue = java.util.LinkedList<Int>()
@@ -245,13 +225,16 @@ fun ColoringApp() {
     var currentBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
 
-    // --- UNDO HISTORY & ZOOM STATE ---
-    val historyStack = remember { mutableStateListOf<ImageBitmap>() }
+    // Safety flag to prevent auto-reloading when an Undo action changes the selected thumbnail
+    var skipNextLoad by remember { mutableStateOf(false) }
+
+    // --- UPGRADED UNDO HISTORY & ZOOM STATE ---
+    val historyStack = remember { mutableStateListOf<CanvasState>() }
     var scale by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
 
     val transformableState = rememberTransformableState { zoomChange, offsetChange, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 8f) // Allow up to 8x zoom
+        scale = (scale * zoomChange).coerceIn(1f, 8f)
         pan += offsetChange
     }
 
@@ -266,7 +249,7 @@ fun ColoringApp() {
         Color(0xFFF48FB1), // Pink
         Color(0xFF795548), // Brown
         Color(0xFFE0E0E0), // White
-        Color(0xFF555555)  // "Trick" Black (Dark Graphite)
+        Color(0xFF555555)  // "Trick" Black (Safe to color over)
     )
     var selectedColor by remember { mutableStateOf(palette[0]) }
 
@@ -282,19 +265,34 @@ fun ColoringApp() {
                 customImageUris = files
                 val thumbs = mutableMapOf<Uri, ImageBitmap>()
                 files.take(20).forEach { fileUri ->
-                    getThumbnailFromUri(context, fileUri)?.let { thumbs[fileUri] = it }
+                    try {
+                        val rotation = getRotationFromExif(context, fileUri)
+                        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        context.contentResolver.openInputStream(fileUri)?.use { BitmapFactory.decodeStream(it, null, options) }
+                        options.inSampleSize = calculateInSampleSize(options, 150, 150)
+                        options.inJustDecodeBounds = false
+                        context.contentResolver.openInputStream(fileUri)?.use {
+                            val bmp = BitmapFactory.decodeStream(it, null, options)
+                            if (bmp != null) thumbs[fileUri] = rotateBitmap(bmp, rotation).asImageBitmap()
+                        }
+                    } catch (e: Exception) {}
                 }
                 customThumbnails = thumbs
             }
         }
     }
 
-    // Load full bitmap whenever the selection changes
+    // Load full bitmap whenever the selection changes (unless triggered by an Undo)
     LaunchedEffect(selectedUri, selectedResId) {
+        if (skipNextLoad) {
+            skipNextLoad = false
+            return@LaunchedEffect
+        }
+
         isProcessing = true
         scale = 1f
         pan = Offset.Zero
-        historyStack.clear()
+        // Notice we do NOT clear the historyStack anymore!
 
         withContext(Dispatchers.IO) {
             if (selectedUri != null) {
@@ -350,7 +348,16 @@ fun ColoringApp() {
                 val isSelected = selectedResId == resId
                 val thumbnail = remember(resId) { Bitmap.createScaledBitmap(BitmapFactory.decodeResource(context.resources, resId), 150, 150, true).asImageBitmap() }
                 Box(modifier = Modifier.padding(end = 8.dp).size(60.dp).border(if (isSelected) 4.dp else 1.dp, if (isSelected) Color(0xFF1E88E5) else Color.Gray, RoundedCornerShape(8.dp))
-                    .clickable { if (!isProcessing) { selectedUri = null; selectedResId = resId } }
+                    .clickable {
+                        if (!isProcessing && selectedResId != resId) {
+                            // Save current artwork to history before switching!
+                            currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
+                            if (historyStack.size > 15) historyStack.removeAt(0)
+
+                            selectedUri = null
+                            selectedResId = resId
+                        }
+                    }
                 ) {
                     Image(bitmap = thumbnail, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                 }
@@ -363,7 +370,16 @@ fun ColoringApp() {
                     val isSelected = selectedUri == uri
                     val thumb = customThumbnails[uri]
                     Box(modifier = Modifier.padding(end = 8.dp).size(60.dp).border(if (isSelected) 4.dp else 1.dp, if (isSelected) Color(0xFF1E88E5) else Color.Gray, RoundedCornerShape(8.dp))
-                        .clickable { if (!isProcessing) { selectedResId = null; selectedUri = uri } }
+                        .clickable {
+                            if (!isProcessing && selectedUri != uri) {
+                                // Save current artwork to history before switching!
+                                currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
+                                if (historyStack.size > 15) historyStack.removeAt(0)
+
+                                selectedResId = null
+                                selectedUri = uri
+                            }
+                        }
                     ) {
                         if (thumb != null) Image(bitmap = thumb, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                         else Box(modifier = Modifier.fillMaxSize().background(Color.LightGray))
@@ -385,11 +401,10 @@ fun ColoringApp() {
 
         // --- Action Buttons Row ---
         Row(
-            // No horizontalScroll here, allowing the Spacer to push buttons to the edges
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 1. SAVE BUTTON (Left side)
+            // 1. SAVE BUTTON
             Text(
                 "💾 Save",
                 fontSize = 14.sp,
@@ -402,22 +417,17 @@ fun ColoringApp() {
                             val success = saveBitmapToGallery(context, bmp.asAndroidBitmap())
                             withContext(Dispatchers.Main) {
                                 isProcessing = false
-                                if (success) {
-                                    Toast.makeText(context, "Saved to Gallery!", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
-                                }
+                                if (success) Toast.makeText(context, "Saved to Gallery!", Toast.LENGTH_SHORT).show()
+                                else Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
                 }
             )
 
-            // --- INVISIBLE SPRING ---
-            // Takes up all empty middle space, pushing Save left, and the rest right
             Spacer(modifier = Modifier.weight(1f))
 
-            // 2. FIT SCREEN BUTTON (Right side)
+            // 2. FIT SCREEN BUTTON
             val canResetView = scale != 1f || pan != Offset.Zero
             Text(
                 "🔍 Fit",
@@ -430,7 +440,7 @@ fun ColoringApp() {
                 }
             )
 
-            // 3. UNDO BUTTON (Right side)
+            // 3. UNDO BUTTON
             Text(
                 "↩️ Undo",
                 fontSize = 14.sp,
@@ -438,12 +448,20 @@ fun ColoringApp() {
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(end = 16.dp).clickable(enabled = historyStack.isNotEmpty()) {
                     if (historyStack.isNotEmpty() && !isProcessing) {
-                        currentBitmap = historyStack.removeLast()
+                        val previousState = historyStack.removeLast()
+
+                        // Prevent the LaunchedEffect from wiping the image
+                        skipNextLoad = true
+
+                        // Restore EVERYTHING
+                        selectedUri = previousState.uri
+                        selectedResId = previousState.resId
+                        currentBitmap = previousState.bitmap
                     }
                 }
             )
 
-            // 4. START OVER BUTTON (Right side)
+            // 4. START OVER BUTTON
             Text(
                 "🔄 Reset",
                 fontSize = 14.sp,
@@ -453,11 +471,9 @@ fun ColoringApp() {
                     scope.launch {
                         isProcessing = true
 
-                        // NEW: Save the current picture to the undo stack before wiping it!
-                        currentBitmap?.let {
-                            historyStack.add(it)
-                            if (historyStack.size > 10) historyStack.removeAt(0)
-                        }
+                        // Save to history before wiping
+                        currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
+                        if (historyStack.size > 15) historyStack.removeAt(0)
 
                         scale = 1f
                         pan = Offset.Zero
@@ -472,21 +488,20 @@ fun ColoringApp() {
             )
         }
 
-        // --- Interactive Canvas (With Zoom & Pan) ---
+        // --- Interactive Canvas ---
         Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(16.dp)
-            .clipToBounds() // Ensure zoomed image doesn't spill over the buttons
+            .clipToBounds()
             .border(2.dp, Color.Black, RoundedCornerShape(8.dp))
             .background(Color.White)
         ) {
             if (currentBitmap != null) {
                 Canvas(
                     modifier = Modifier.fillMaxSize()
-                        .transformable(state = transformableState) // 2-finger zoom/pan
+                        .transformable(state = transformableState)
                         .pointerInput(currentBitmap) {
                             detectTapGestures { offset ->
                                 if (isProcessing || currentBitmap == null) return@detectTapGestures
 
-                                // MATHEMATICAL MAGIC: Reverse the zoom and pan to find the exact pixel tapped
                                 val centerX = size.width / 2f
                                 val centerY = size.height / 2f
 
@@ -509,24 +524,19 @@ fun ColoringApp() {
                                 val tapX = ((unscaledX - imgOffsetX) / imgScale).toInt()
                                 val tapY = ((unscaledY - imgOffsetY) / imgScale).toInt()
 
-                                // Ensure they tapped inside the actual image
                                 if (tapX in 0 until currentBitmap!!.width && tapY in 0 until currentBitmap!!.height) {
                                     val androidBmp = currentBitmap!!.asAndroidBitmap()
                                     val targetColor = androidBmp.getPixel(tapX, tapY)
 
-                                    // SECURITY: Protect the black outlines!
-                                    if (colorMatch(targetColor, android.graphics.Color.BLACK, 80)) {
-                                        return@detectTapGestures // Cancel the tap entirely
-                                    }
+                                    if (colorMatch(targetColor, android.graphics.Color.BLACK, 80)) return@detectTapGestures
 
                                     isProcessing = true
                                     val colorToFill = selectedColor.toArgb()
 
                                     scope.launch(Dispatchers.IO) {
-                                        // Save to History Stack before changing!
                                         withContext(Dispatchers.Main) {
-                                            historyStack.add(currentBitmap!!)
-                                            if (historyStack.size > 10) historyStack.removeAt(0) // Keep last 10 actions
+                                            historyStack.add(CanvasState(currentBitmap!!, selectedUri, selectedResId))
+                                            if (historyStack.size > 15) historyStack.removeAt(0)
                                         }
 
                                         val newAndroidBmp = floodFill(androidBmp, tapX, tapY, colorToFill)
@@ -540,7 +550,6 @@ fun ColoringApp() {
                             }
                         }
                 ) {
-                    // Draw the image with Zoom & Pan applied visually
                     withTransform({
                         translate(left = pan.x, top = pan.y)
                         scale(scaleX = scale, scaleY = scale, pivot = Offset(size.width / 2f, size.height / 2f))
