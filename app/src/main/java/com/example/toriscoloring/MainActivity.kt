@@ -207,13 +207,12 @@ fun ColoringApp() {
     val prefs = remember { context.getSharedPreferences("ToriColoringPrefs", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
 
-// --- Built-in Image Library ---
+    // --- Built-in Image Library ---
     val defaultImageLibrary = listOf<Int>(
         // Paw Patrol
         R.drawable.ppcolor1, R.drawable.ppcolor2, R.drawable.ppcolor3,
         R.drawable.ppcolor4, R.drawable.ppcolor5, R.drawable.ppcolor6,
         R.drawable.ppcolor7, R.drawable.ppcolor8, R.drawable.ppcolor9,
-
         // Octonauts
         R.drawable.octo1, R.drawable.octo2,
         R.drawable.octo_gup_a, R.drawable.octo_gup_b,
@@ -232,11 +231,13 @@ fun ColoringApp() {
     var currentBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
 
-    // Safety flag to prevent auto-reloading when an Undo action changes the selected thumbnail
     var skipNextLoad by remember { mutableStateOf(false) }
+    var isSettingsUnlocked by remember { mutableStateOf(false) }
 
-    // --- UPGRADED UNDO HISTORY & ZOOM STATE ---
+    // --- UPGRADED UNDO & REDO HISTORY & ZOOM STATE ---
     val historyStack = remember { mutableStateListOf<CanvasState>() }
+    val redoStack = remember { mutableStateListOf<CanvasState>() }
+
     var scale by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
 
@@ -289,7 +290,7 @@ fun ColoringApp() {
         }
     }
 
-    // Load full bitmap whenever the selection changes (unless triggered by an Undo)
+    // Load full bitmap whenever the selection changes
     LaunchedEffect(selectedUri, selectedResId) {
         if (skipNextLoad) {
             skipNextLoad = false
@@ -299,7 +300,6 @@ fun ColoringApp() {
         isProcessing = true
         scale = 1f
         pan = Offset.Zero
-        // Notice we do NOT clear the historyStack anymore!
 
         withContext(Dispatchers.IO) {
             if (selectedUri != null) {
@@ -317,29 +317,50 @@ fun ColoringApp() {
             context.contentResolver.takePersistableUriPermission(uri, takeFlags)
             prefs.edit().putString("CustomColorFolder", uri.toString()).apply()
             customFolderUri = uri
+            isSettingsUnlocked = false
         }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 48.dp, bottom = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        // --- Header ---
+        // --- Header with Parent Lock ---
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Tori's Coloring Book", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF2E7D32))
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(
-                    onClick = { folderPickerLauncher.launch(null) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E24AA)),
-                    contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.height(30.dp)
-                ) { Text("📁 Album", fontSize = 12.sp) }
+                Text(
+                    text = if (isSettingsUnlocked) "🔓" else "🔒",
+                    fontSize = 24.sp,
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onLongPress = { isSettingsUnlocked = !isSettingsUnlocked },
+                                onTap = {
+                                    if (!isSettingsUnlocked) {
+                                        Toast.makeText(context, "Press and hold to unlock album settings", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                        }
+                )
 
-                if (customFolderUri != null) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("❌", fontSize = 16.sp, modifier = Modifier.clickable {
-                        prefs.edit().remove("CustomColorFolder").apply()
-                        customFolderUri = null
-                        selectedUri = null
-                        selectedResId = defaultImageLibrary[0]
-                    })
+                if (isSettingsUnlocked) {
+                    Button(
+                        onClick = { folderPickerLauncher.launch(null) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E24AA)),
+                        contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.height(30.dp)
+                    ) { Text("📁 Album", fontSize = 12.sp) }
+
+                    if (customFolderUri != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("❌", fontSize = 16.sp, modifier = Modifier.clickable {
+                            prefs.edit().remove("CustomColorFolder").apply()
+                            customFolderUri = null
+                            selectedUri = null
+                            selectedResId = defaultImageLibrary[0]
+                            isSettingsUnlocked = false
+                        })
+                    }
                 }
             }
         }
@@ -357,10 +378,9 @@ fun ColoringApp() {
                 Box(modifier = Modifier.padding(end = 8.dp).size(60.dp).border(if (isSelected) 4.dp else 1.dp, if (isSelected) Color(0xFF1E88E5) else Color.Gray, RoundedCornerShape(8.dp))
                     .clickable {
                         if (!isProcessing && selectedResId != resId) {
-                            // Save current artwork to history before switching!
                             currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
                             if (historyStack.size > 15) historyStack.removeAt(0)
-
+                            redoStack.clear() // Clear redo history on new action
                             selectedUri = null
                             selectedResId = resId
                         }
@@ -379,10 +399,9 @@ fun ColoringApp() {
                     Box(modifier = Modifier.padding(end = 8.dp).size(60.dp).border(if (isSelected) 4.dp else 1.dp, if (isSelected) Color(0xFF1E88E5) else Color.Gray, RoundedCornerShape(8.dp))
                         .clickable {
                             if (!isProcessing && selectedUri != uri) {
-                                // Save current artwork to history before switching!
                                 currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
                                 if (historyStack.size > 15) historyStack.removeAt(0)
-
+                                redoStack.clear() // Clear redo history on new action
                                 selectedResId = null
                                 selectedUri = uri
                             }
@@ -441,7 +460,7 @@ fun ColoringApp() {
                 fontSize = 14.sp,
                 color = if (canResetView) Color(0xFF1E88E5) else Color.Gray,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(end = 16.dp).clickable(enabled = canResetView) {
+                modifier = Modifier.padding(end = 12.dp).clickable(enabled = canResetView) {
                     scale = 1f
                     pan = Offset.Zero
                 }
@@ -453,14 +472,13 @@ fun ColoringApp() {
                 fontSize = 14.sp,
                 color = if (historyStack.isNotEmpty()) Color(0xFF1E88E5) else Color.Gray,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(end = 16.dp).clickable(enabled = historyStack.isNotEmpty()) {
+                modifier = Modifier.padding(end = 12.dp).clickable(enabled = historyStack.isNotEmpty()) {
                     if (historyStack.isNotEmpty() && !isProcessing) {
+                        // Push current state to REDO stack before wiping it
+                        currentBitmap?.let { redoStack.add(CanvasState(it, selectedUri, selectedResId)) }
+
                         val previousState = historyStack.removeLast()
-
-                        // Prevent the LaunchedEffect from wiping the image
                         skipNextLoad = true
-
-                        // Restore EVERYTHING
                         selectedUri = previousState.uri
                         selectedResId = previousState.resId
                         currentBitmap = previousState.bitmap
@@ -468,7 +486,28 @@ fun ColoringApp() {
                 }
             )
 
-            // 4. START OVER BUTTON
+            // 4. REDO BUTTON
+            Text(
+                "↪️ Redo",
+                fontSize = 14.sp,
+                color = if (redoStack.isNotEmpty()) Color(0xFF1E88E5) else Color.Gray,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(end = 12.dp).clickable(enabled = redoStack.isNotEmpty()) {
+                    if (redoStack.isNotEmpty() && !isProcessing) {
+                        // Push current state back to UNDO stack
+                        currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
+                        if (historyStack.size > 15) historyStack.removeAt(0)
+
+                        val nextState = redoStack.removeLast()
+                        skipNextLoad = true
+                        selectedUri = nextState.uri
+                        selectedResId = nextState.resId
+                        currentBitmap = nextState.bitmap
+                    }
+                }
+            )
+
+            // 5. START OVER BUTTON
             Text(
                 "🔄 Reset",
                 fontSize = 14.sp,
@@ -477,10 +516,9 @@ fun ColoringApp() {
                 modifier = Modifier.clickable {
                     scope.launch {
                         isProcessing = true
-
-                        // Save to history before wiping
                         currentBitmap?.let { historyStack.add(CanvasState(it, selectedUri, selectedResId)) }
                         if (historyStack.size > 15) historyStack.removeAt(0)
+                        redoStack.clear() // Clear redo history on new action
 
                         scale = 1f
                         pan = Offset.Zero
@@ -544,6 +582,7 @@ fun ColoringApp() {
                                         withContext(Dispatchers.Main) {
                                             historyStack.add(CanvasState(currentBitmap!!, selectedUri, selectedResId))
                                             if (historyStack.size > 15) historyStack.removeAt(0)
+                                            redoStack.clear() // Clear redo history on new color action
                                         }
 
                                         val newAndroidBmp = floodFill(androidBmp, tapX, tapY, colorToFill)
